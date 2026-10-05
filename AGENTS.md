@@ -74,11 +74,18 @@
   同一进程累计超过 8 次则按 v1.2 Thread-5 先例原始 exit 结束看门狗线程防死循环。
 - guard2 真机验证: 游戏首次走完载入界面, 但提示界面阶段看门狗的自杀 BLR 这次
   跳进了 libart 合法地址并以垃圾参数空指针崩溃（`lr` 在 libart 内, 崩溃点兜底
-  无法覆盖）。结论: 自杀 BLR 的目标是运行期垃圾值, 必须拔根。已在
-  `patch_limbus_appsealing_70034` 中挂入 `patch_limbus_30010_kill`: 一次性 dump
-  `base+0xd18c0~0xd1950` 指令留档, 并把窗口 `[0xd18dc, 0xd18f8]` 内所有
-  BLR/BR 编码（`0xd63f0000`/`0xd61f0000` 掩码匹配）NOP 掉, 每个点位记录原始指令;
-  guard 窗口 neuter 规则保留作为兜底。
+  无法覆盖）。结论: 自杀 BLR 的目标是运行期垃圾值, 必须拔根。
+- 2026-10-05 经 KSU root 从容器提取 `libcovault-appsec.so`（C220605-002, 文件
+  vaddr 与运行期偏移一致, 未加壳）静态反汇编定位到根因: 全 so 仅一处
+  `mov w2, #0x753a`(30010), 击杀分发点为 `0x70128: blr x5`（XOR 解密函数指针,
+  参数 context/0/30010/0/0）。其进入的 0xd18d8 函数依次 blr `[x0+0x30]/[x0+0x78]/
+  [x0+0x88]` 三个被故意填成垃圾的函数指针, 把击杀伪装成普通 SIGSEGV。
+  `patch_limbus_30010_kill` 现 NOP 该分发点（expected=0xd63f00a0）, 检测逻辑不动;
+  0x70150 的 `blr x0` 对应 MAIN EXIT 打印, 保持不动。
+- **教训**: guard3 曾把 0xd18dc/0xd18f0 的连环 blr 直接 NOP, 结果所有容器进程
+  启动约 1.5 秒后静默 SIGSEGV 死亡（无 guard 日志, 疑似屏蔽信号后的确定性击杀
+  或该函数在正常流程中亦被使用）。对该函数区域不得再做代码级 NOP, guard 窗口
+  neuter（已扩到 `[0xd18dc, 0xd1913)` 覆盖第三跳返回）仅作兜底。
 
 ## 当前调试状态
 

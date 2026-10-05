@@ -1901,7 +1901,7 @@ static void limbus_sigsegv_guard(int sig, siginfo_t *info, void *context) {
             && !limbus_signal_is_mapped(pc)
             && g_limbus_appsealing_base != 0
             && lr >= g_limbus_appsealing_base + 0xd18dc
-            && lr <= g_limbus_appsealing_base + 0xd18ff
+            && lr <= g_limbus_appsealing_base + 0xd1913
             && limbus_signal_raw_syscall4(__NR_gettid, 0, 0, 0, 0)
                     != limbus_signal_raw_syscall4(__NR_getpid, 0, 0, 0, 0)) {
         static volatile int kill_jump_neuters = 0;
@@ -4662,44 +4662,24 @@ static bool patch_limbus_nop(uintptr_t base,
 }
 
 /*
- * 30010 自杀函数处置（covault C220605-002，vivo V2453A / Android 16 / 游戏 v478）：
- * 看门狗线程在 base+0xd18dc / base+0xd18f0 连续执行跳向运行期垃圾地址的
- * BLR 间接调用自毁。2026-10-05 两份真机日志确认：一次跳向 0x4000/0x80001204
- * 两个未映射地址，一次跳进 libart 合法地址后以垃圾参数空指针崩溃——目标值
- * 每次不同，在崩溃点兜底无法覆盖“目标恰好合法”的情况。因此直接把该确认
- * 窗口内的 BLR/BR 间接分支 NOP 掉：neuter 恢复点之后的代码已被真机验证可
- * 正常执行，fallen-through 路径安全。窗口内非 BLR/BR 指令一律不动，并做
- * 一次性 dump 留档供后续核对。
+ * 30010 击杀分发点处置（covault C220605-002，vivo V2453A / Android 16 / 游戏 v478）。
+ * 2026-10-05 真机提取 libcovault-appsec.so 静态反汇编确认（文件 vaddr 与运行期
+ * 偏移一一对应）：全 so 仅一处 `mov w2, #0x753a`（30010），位于检测上报函数内：
+ *   0x70128: blr x5   ; x5 由 XOR 解密的全局函数指针解析，参数
+ *                     ; (x0=context, x1=0, w2=30010, w3=0, w4=0)
+ * 该分发器最终进入 0xd18d8 起的函数，依次 blr 结构体函数指针
+ * [x0+0x30]/[x0+0x78]/[x0+0x88]——指针被故意填成垃圾值（0x4000 等），
+ * 让击杀伪装成普通原生 SIGSEGV 崩溃；垃圾目标偶尔落在合法代码段时，
+ * 则表现为 libart 内的空指针崩溃（2026-10-05 两份真机日志各印证一种）。
+ * 因此只 NOP 这一个分发点（原始编码 0xd63f00a0 = blr x5，不符即拒绝）：
+ * 检测逻辑照常运行，仅跳过击杀调用；随后的 0x70150 blr x0 对应日志中的
+ * MAIN EXIT 打印路径，保持不动。
+ * 注意：不得同时 NOP 0xd18dc/0xd18f0/0xd1904 的连环 blr——2026-10-05
+ * guard3 构建实测该做法会导致所有容器进程在启动后约 1.5 秒静默 SIGSEGV
+ * 死亡（无任何 guard 日志），该函数在正常流程中同样被使用。
  */
 static void patch_limbus_30010_kill(uintptr_t base) {
-    static pthread_mutex_t kill_patch_lock = PTHREAD_MUTEX_INITIALIZER;
-    static bool dumped = false;
-    pthread_mutex_lock(&kill_patch_lock);
-    if (!dumped) {
-        dumped = true;
-        for (uintptr_t row = 0xd18c0; row < 0xd1950; row += 0x18) {
-            ALOGE("Limbus 30010 dump >>> base+0x%lx : %08x %08x %08x %08x %08x %08x",
-                  static_cast<unsigned long>(row),
-                  *reinterpret_cast<volatile uint32_t *>(base + row),
-                  *reinterpret_cast<volatile uint32_t *>(base + row + 0x4),
-                  *reinterpret_cast<volatile uint32_t *>(base + row + 0x8),
-                  *reinterpret_cast<volatile uint32_t *>(base + row + 0xc),
-                  *reinterpret_cast<volatile uint32_t *>(base + row + 0x10),
-                  *reinterpret_cast<volatile uint32_t *>(base + row + 0x14));
-        }
-    }
-    for (uintptr_t offset = 0xd18dc; offset <= 0xd18f8; offset += 0x4) {
-        uint32_t insn = *reinterpret_cast<volatile uint32_t *>(base + offset);
-        if (((insn & 0xfffffc1fU) != 0xd63f0000U)       // BLR Xn
-                && ((insn & 0xfffffc1fU) != 0xd61f0000U)) { // BR Xn
-            continue;
-        }
-        ALOGE("Limbus 30010 patch >>> blr found offset=0x%lx insn=0x%08x",
-              static_cast<unsigned long>(offset),
-              insn);
-        patch_limbus_nop(base, offset, "30010-kill-jump", insn);
-    }
-    pthread_mutex_unlock(&kill_patch_lock);
+    patch_limbus_nop(base, 0x70128, "30010-kill-dispatch", 0xd63f00a0);
 }
 
 static void patch_limbus_appsealing_70034(uintptr_t base) {
