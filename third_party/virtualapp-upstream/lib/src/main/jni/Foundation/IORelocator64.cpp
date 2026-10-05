@@ -302,7 +302,7 @@ static bool should_return_from_limbus_known_exit() {
     return strcmp(value, "return") == 0;
 }
 
-static void log_limbus_signal_diagnostic(const char *api, pid_t tid, int sig) {
+static void log_limbus_signal_diagnostic(const char *api, pid_t tid, int sig, void *caller) {
     if (!is_limbus_container_process()) {
         return;
     }
@@ -333,6 +333,28 @@ static void log_limbus_signal_diagnostic(const char *api, pid_t tid, int sig) {
           static_cast<long>(syscall(__NR_gettid)),
           tid,
           target_name[0] == '\0' ? "<unknown>" : target_name);
+    // Personal-targeted capture for AppSealing kill codes (e.g. 30010 on
+    // vivo/Android 16 with covault C220605-002 / game v478). The watchdog
+    // raises these self-signals immediately before terminating the virtual
+    // game process; the hook return address here is AppSealing's kill
+    // invocation site. Record the libcovault offset so a confirmed nop/branch
+    // patch can be derived per AGENTS.md's runtime-backtrace rule. This is
+    // read-only logging and must not change the signal outcome.
+    if (caller != nullptr) {
+        Dl_info info;
+        memset(&info, 0, sizeof(info));
+        if (dladdr(caller, &info) != 0 && info.dli_fname != nullptr
+                && strstr(info.dli_fname, "libcovault-appsec.so") != nullptr) {
+            uintptr_t base = reinterpret_cast<uintptr_t>(info.dli_fbase);
+            uintptr_t off = reinterpret_cast<uintptr_t>(caller) - base;
+            ALOGE("%s >>> Limbus AppSealing kill caller libcovault-appsec.so +0x%lx "
+                  "(caller=%p base=%p)",
+                  api,
+                  static_cast<unsigned long>(off),
+                  caller,
+                  reinterpret_cast<void *>(base));
+        }
+    }
 }
 
 static bool should_patch_limbus_known_exit_point(const char *api, int status, void *caller) {
@@ -1338,7 +1360,7 @@ HOOK_DEF(int, raise, int sig) {
 // int tkill(pid_t tid, int sig);
 HOOK_DEF(int, tkill, pid_t tid, int sig) {
     ALOGE("tkill >>> tid : %d, sig : %d", tid, sig);
-    log_limbus_signal_diagnostic("tkill", tid, sig);
+    log_limbus_signal_diagnostic("tkill", tid, sig, __builtin_return_address(0));
     if (should_block_limbus_terminating_signal(sig)) {
         ALOGE("tkill >>> blocked Limbus container signal : %d tid : %d", sig, tid);
         return block_limbus_signal_int();
@@ -1356,7 +1378,7 @@ HOOK_DEF(int, tgkill, pid_t tgid, pid_t tid, int sig) {
     if (!is_limbus_allowed_signal_noise(sig)) {
         ALOGE("tgkill >>> tgid : %d, tid : %d, sig : %d, self : %d", tgid, tid, sig, self);
     }
-    log_limbus_signal_diagnostic("tgkill", tid, sig);
+    log_limbus_signal_diagnostic("tgkill", tid, sig, __builtin_return_address(0));
     if (should_block_limbus_terminating_signal(sig)) {
         ALOGE("tgkill >>> blocked Limbus container signal : %d tid : %d", sig, tid);
         return block_limbus_signal_int();
@@ -1373,7 +1395,10 @@ HOOK_DEF(int, pthread_kill, pthread_t thread, int sig) {
     if (!is_limbus_allowed_signal_noise(sig)) {
         ALOGE("pthread_kill >>> sig : %d", sig);
     }
-    log_limbus_signal_diagnostic("pthread_kill", static_cast<pid_t>(syscall(__NR_gettid)), sig);
+    log_limbus_signal_diagnostic("pthread_kill",
+                                  static_cast<pid_t>(syscall(__NR_gettid)),
+                                  sig,
+                                  __builtin_return_address(0));
     if (should_block_limbus_terminating_signal(sig)) {
         ALOGE("pthread_kill >>> blocked Limbus container signal : %d", sig);
         return block_limbus_signal_int();

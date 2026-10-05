@@ -48,6 +48,20 @@
   该包装器须独立通过原始 `sigaction` 维护,不得扩展已被 inline hook 的 `sigaction` 函数体,
   否则会改变前导指令布局并导致 Android 12 在 `__fix_instructions` 崩溃。
 
+## 已知设备级阻断（vivo V2453A / Android 16 / 游戏 v478 / covault C220605-002）
+
+- 现象: 容器启动、AppSealing 50040/50048/70034 绕过、LimbusTranslation IL2CPP init boundary
+  (`translationReady=1`) 均成功; 随后 AppSealing 在 Unity/图形初始化附近报 `Kill Process [30010]`
+  并终止 p0（`SIGSEGV status=11`）。`git grep 30010` 零命中, 仓库无此代码偏移, 现有绕过不覆盖它。
+- 30010 是 AppSealing 看门狗自检信号（`pthread_kill`/`tgkill` 对游戏进程发 `SIGPWR(30)`/
+  `SIGXCPU(24)`）之后的新上报码, 字符串在 `.so` 中既不被 `.text` 直接 `adrp` 引用, 也无 GOT 槽
+  指向它, 静态定位成本高且盲目 nop 有陷入 SIGILL 死循环风险。
+- 已按"运行时 backtrace 确认偏移"方法增强 `IORelocator64.cpp::log_limbus_signal_diagnostic`:
+  在看门狗发 30/24 自检信号且调用者落在 `libcovault-appsec.so` 时, 打印
+  `Limbus AppSealing kill caller libcovault-appsec.so +0xNNN`。下一步: 在真机重建并仅启动一次游戏,
+  从新诊断里取该偏移, 据此为 30010 上报调用实现 nop/branch 跳过（仍须反汇编/backtrace 确认,
+  不得擅自泛化屏蔽）。该增强为只读日志, 不改信号结果, 可安全回退。
+
 ## 当前调试状态
 
 - 设备地址最近变动频繁; 以用户最新给出的 adb 地址为准。
