@@ -1888,14 +1888,14 @@ static void limbus_sigsegv_guard(int sig, siginfo_t *info, void *context) {
      * 段确认代码里连续执行多条跳向无效地址的间接分支自毁。运行期已确认两跳：
      *   第一跳 pc=address=0x4000、x2=0x4000、lr=base+0xd18e0（lr-4=BLR X2）
      *   第二跳 pc=address=0x80001204、x1=0x80001204、lr=base+0xd18f4
-     * 静态反汇编确认该处决程序是带循环的巨型函数（0xd2a30: subs w27 / b.ne
-     * 0xd16e4），每轮调用一批垃圾函数指针，跳转点分布在 0xd18dc~0xd1ac0 及
-     * 之后。因此接管窗口扩为整个函数范围 [base+0xd1100, base+0xd394f]：
-     * 故障地址即 PC、PC 未映射、lr 落在窗口内且为非主线程时，恢复 pc=lr
-     * 让这条自杀调用等价于普通返回；同一进程累计超过 8 次则按 v1.2
-     * Thread-5 先例以原始 exit 结束该看门狗线程（cap 即设计终局：看门狗
-     * 线程死亡，游戏进程存活）。窗口外或主线程的真实内存错误仍交给
-     * 原有处理流程。
+     * 静态反汇编与真机日志确认：击杀是一条调用链（分发器 → 巨型处决函数
+     * [0xd1100,0xd3950)，内含带循环的多批垃圾函数指针调用 → 返回后继续
+     * 0x2bd4c 等后续段 → 每段都有跳向垃圾地址的间接调用），逐段 neuter
+     * 打地鼠没有尽头。因此改为首杀即终局：故障地址即 PC、PC 未映射、
+     * lr 落在处决函数窗口内且为非主线程时，不做恢复，直接按 v1.2
+     * Thread-5 先例以原始 exit 结束该看门狗线程——杀死杀手，链路在
+     * 第一个垃圾调用处断开，后续段不再执行。窗口外或主线程的真实
+     * 内存错误仍交给原有处理流程。
      */
     if (context != nullptr
             && info != nullptr
@@ -1907,47 +1907,18 @@ static void limbus_sigsegv_guard(int sig, siginfo_t *info, void *context) {
             && lr <= g_limbus_appsealing_base + 0xd394f
             && limbus_signal_raw_syscall4(__NR_gettid, 0, 0, 0, 0)
                     != limbus_signal_raw_syscall4(__NR_getpid, 0, 0, 0, 0)) {
-        static volatile int kill_jump_neuters = 0;
-        int neuters = __sync_add_and_fetch(&kill_jump_neuters, 1);
-        if (neuters > 8) {
-            static const char isolated_message[] =
-                    "Limbus SIGSEGV guard: isolated AppSealing 30010 kill loop, exiting watchdog thread\n";
-            limbus_signal_raw_syscall4(
-                    __NR_write,
-                    STDERR_FILENO,
-                    reinterpret_cast<long>(isolated_message),
-                    sizeof(isolated_message) - 1,
-                    0);
-            for (;;) {
-                limbus_signal_raw_syscall4(__NR_exit, 0, 0, 0, 0);
-            }
+        static const char isolated_message[] =
+                "Limbus SIGSEGV guard: detected AppSealing kill sequence, exiting watchdog thread\n";
+        limbus_signal_raw_syscall4(
+                __NR_write,
+                STDERR_FILENO,
+                reinterpret_cast<long>(isolated_message),
+                sizeof(isolated_message) - 1,
+                0);
+        __android_log_write(ANDROID_LOG_WARN, "LimbusSIG", isolated_message);
+        for (;;) {
+            limbus_signal_raw_syscall4(__NR_exit, 0, 0, 0, 0);
         }
-        auto *ucontext = reinterpret_cast<ucontext_t *>(context);
-        ucontext->uc_mcontext.pc = lr;
-        char message[192];
-        char *msg = message;
-        char *msg_end = message + sizeof(message) - 2;
-        msg = limbus_signal_append_text(
-                msg, msg_end,
-                "Limbus SIGSEGV guard: neutered AppSealing 30010 kill jump #");
-        msg = limbus_signal_append_signed(msg, msg_end, neuters);
-        msg = limbus_signal_append_text(msg, msg_end, " lr_off=");
-        msg = limbus_signal_append_hex(msg, msg_end,
-                lr - g_limbus_appsealing_base);
-        msg = limbus_signal_append_text(msg, msg_end, " insn=");
-        if (limbus_signal_is_mapped(lr - 4)) {
-            msg = limbus_signal_append_hex(
-                    msg, msg_end,
-                    *reinterpret_cast<const volatile uint32_t *>(lr - 4));
-        } else {
-            msg = limbus_signal_append_text(msg, msg_end, "unmapped");
-        }
-        *msg++ = '\n';
-        *msg = '\0';
-        syscall(__NR_write, STDERR_FILENO, message,
-                static_cast<size_t>(msg - message));
-        __android_log_write(ANDROID_LOG_WARN, "LimbusSIG", message);
-        return;
     }
 #endif
     cursor = limbus_signal_append_text(cursor, end, "Limbus SIGSEGV guard: si_code=");
