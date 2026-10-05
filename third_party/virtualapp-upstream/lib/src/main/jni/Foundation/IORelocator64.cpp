@@ -1891,17 +1891,17 @@ static void limbus_sigsegv_guard(int sig, siginfo_t *info, void *context) {
      * 静态反汇编与真机日志确认：击杀是一条调用链（分发器 → 巨型处决函数
      * [0xd1100,0xd3950)，内含带循环的多批垃圾函数指针调用 → 返回后继续
      * 0x2bd4c 等后续段 → 每段都有跳向垃圾地址的间接调用），逐段 neuter
-     * 打地鼠没有尽头。因此改为首杀即终局：故障地址即 PC、PC 未映射、
-     * lr 落在处决函数窗口内且为非主线程时，不做恢复，直接按 v1.2
-     * Thread-5 先例以原始 exit 结束该看门狗线程——杀死杀手，链路在
-     * 第一个垃圾调用处断开，后续段不再执行。窗口外或主线程的真实
-     * 内存错误仍交给原有处理流程。
+     * 打地鼠没有尽头。因此改为首杀即终局：同步 SIGSEGV 的 lr 落在处决
+     * 函数窗口内且为非主线程时，不做恢复，直接按 v1.2 Thread-5 先例以
+     * 原始 exit 结束该看门狗线程——杀死杀手，链路在第一个垃圾调用处
+     * 断开。2026-10-06 033835 运行确认垃圾目标还可能落在已映射但不可
+     * 执行的页（si_code=2/SEGV_ACCERR, pc=0x7772d8853c），因此不再约束
+     * pc 形态，仅按 lr 归属判断。窗口外或主线程的真实内存错误仍交给
+     * 原有处理流程。
      */
     if (context != nullptr
             && info != nullptr
             && info->si_code > 0
-            && pc == address
-            && !limbus_signal_is_mapped(pc)
             && g_limbus_appsealing_base != 0
             && lr >= g_limbus_appsealing_base + 0xd1100
             && lr <= g_limbus_appsealing_base + 0xd394f
