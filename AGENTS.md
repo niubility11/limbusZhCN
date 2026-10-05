@@ -61,6 +61,12 @@
   `Limbus AppSealing kill caller libcovault-appsec.so +0xNNN`。下一步: 在真机重建并仅启动一次游戏,
   从新诊断里取该偏移, 据此为 30010 上报调用实现 nop/branch 跳过（仍须反汇编/backtrace 确认,
   不得擅自泛化屏蔽）。该增强为只读日志, 不改信号结果, 可安全回退。
+- 2026-10-05 真机日志（capture 构建）确认: 30010 自杀**不走** `tkill/tgkill/pthread_kill`,
+  而是看门狗线程（Thread-4）执行一条跳向无效地址的间接分支自毁。确认现场:
+  `pc = address = 0x4000`、`x2 = 0x4000`、`lr = base+0xd18e0`（即 lr_map 的
+  `libcovault-appsec.so+0x248e0`）、非主线程。已在 `limbus_sigsegv_guard` 中按
+  "确认现场才接管"纪律加恢复分支: 五要素全匹配时把 pc 恢复为 lr（自杀调用等价于普通返回）,
+  并打印 `neutered AppSealing 30010 kill jump` 供核验; 其余真实内存错误不受影响。
 
 ## 当前调试状态
 

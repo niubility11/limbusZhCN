@@ -1881,6 +1881,50 @@ static void limbus_sigsegv_guard(int sig, siginfo_t *info, void *context) {
             return;
         }
     }
+    /*
+     * 2026-10-05 vivo V2453A / Android 16 (API 36)、游戏 v478（covault C220605-002）
+     * 的 30010 自杀路径：AppSealing 看门狗线程（Thread-4）不经过 tkill/tgkill/
+     * pthread_kill（libc 信号 hook 因此抓不到），而是执行一条跳向无效地址的
+     * 间接分支自毁。运行期诊断现场固定为：
+     *   pc = address = 0x4000（取指缺页，si_code=1）
+     *   x2 = 0x4000（被间接调用的无效函数指针）
+     *   lr = libcovault-appsec.so + 0xd18e0（自杀调用点的返回地址）
+     * 只在基址、偏移、故障地址、寄存器全部吻合且位于非主线程时，把 pc 恢复
+     * 为 lr，使这次“自杀调用”等价于一次普通返回；其余真实内存错误仍交给
+     * 原有处理流程。
+     */
+    if (context != nullptr
+            && info != nullptr
+            && info->si_code > 0
+            && pc == address
+            && address == 0x4000
+            && registers[2] == 0x4000
+            && g_limbus_appsealing_base != 0
+            && lr == g_limbus_appsealing_base + 0xd18e0
+            && limbus_signal_raw_syscall4(__NR_gettid, 0, 0, 0, 0)
+                    != limbus_signal_raw_syscall4(__NR_getpid, 0, 0, 0, 0)) {
+        auto *ucontext = reinterpret_cast<ucontext_t *>(context);
+        ucontext->uc_mcontext.pc = lr;
+        char message[192];
+        char *msg = message;
+        char *msg_end = message + sizeof(message) - 2;
+        msg = limbus_signal_append_text(
+                msg, msg_end,
+                "Limbus SIGSEGV guard: neutered AppSealing 30010 kill jump, resumed at lr insn=");
+        if (limbus_signal_is_mapped(lr - 4)) {
+            msg = limbus_signal_append_hex(
+                    msg, msg_end,
+                    *reinterpret_cast<const volatile uint32_t *>(lr - 4));
+        } else {
+            msg = limbus_signal_append_text(msg, msg_end, "unmapped");
+        }
+        *msg++ = '\n';
+        *msg = '\0';
+        syscall(__NR_write, STDERR_FILENO, message,
+                static_cast<size_t>(msg - message));
+        __android_log_write(ANDROID_LOG_WARN, "LimbusSIG", message);
+        return;
+    }
 #endif
     cursor = limbus_signal_append_text(cursor, end, "Limbus SIGSEGV guard: si_code=");
     cursor = limbus_signal_append_signed(cursor, end, info != nullptr ? info->si_code : 0);
