@@ -2024,12 +2024,19 @@ static void limbus_sigsegv_guard(int sig, siginfo_t *info, void *context) {
              * 这里只在基址、偏移、故障地址、寄存器、四条指令以及“非主线程”全部匹配
              * 诊断现场时，用未经过 libc hook 的原始 exit 系统调用结束当前后台线程。
              * 其他同步故障仍保留下面的默认终止语义，避免吞掉真实崩溃。
+             *
+             * 2026-10-05 vivo V2453A / Android 16 / 游戏 v478 (covault C220605-002)
+             * 确认同一故障出现在 +0xd18d4（lr_map 段偏移仍为 +0x248d4，见 issue3
+             * 关于 ELF 装载基址与文件段偏移两套坐标的说明）：Thread-4 在击杀函数
+             * 内因 [x19] 为空在读 `ldr x2,[x0,#0x30]` 处触发同样的 addr=0x30 现场，
+             * 四条指令指纹完全一致。两个偏移共同接受该隔离。
              */
             uintptr_t appsealing_base = g_limbus_appsealing_base;
             long current_tid = limbus_signal_raw_syscall4(__NR_gettid, 0, 0, 0, 0);
             long process_id = limbus_signal_raw_syscall4(__NR_getpid, 0, 0, 0, 0);
             if (appsealing_base != 0
-                    && pc == appsealing_base + 0x248d4
+                    && (pc == appsealing_base + 0x248d4
+                        || pc == appsealing_base + 0xd18d4)
                     && address == 0x30
                     && registers[0] == 0
                     && current_tid > 0
