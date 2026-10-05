@@ -1888,10 +1888,13 @@ static void limbus_sigsegv_guard(int sig, siginfo_t *info, void *context) {
      * 段确认代码里连续执行多条跳向无效地址的间接分支自毁。运行期已确认两跳：
      *   第一跳 pc=address=0x4000、x2=0x4000、lr=base+0xd18e0（lr-4=BLR X2）
      *   第二跳 pc=address=0x80001204、x1=0x80001204、lr=base+0xd18f4
-     * 只在故障地址即 PC、PC 未映射、lr 落在确认窗口 [base+0xd18dc, base+0xd18ff]
-     * 且为非主线程时接管：恢复 pc=lr 让这条自杀调用等价于普通返回；同一进程
-     * 累计超过 8 次则按 v1.2 Thread-5 先例以原始 exit 结束该看门狗线程，
-     * 防止修复被反复触发形成死循环。窗口外或主线程的真实内存错误仍交给
+     * 静态反汇编确认该处决程序是带循环的巨型函数（0xd2a30: subs w27 / b.ne
+     * 0xd16e4），每轮调用一批垃圾函数指针，跳转点分布在 0xd18dc~0xd1ac0 及
+     * 之后。因此接管窗口扩为整个函数范围 [base+0xd1100, base+0xd394f]：
+     * 故障地址即 PC、PC 未映射、lr 落在窗口内且为非主线程时，恢复 pc=lr
+     * 让这条自杀调用等价于普通返回；同一进程累计超过 8 次则按 v1.2
+     * Thread-5 先例以原始 exit 结束该看门狗线程（cap 即设计终局：看门狗
+     * 线程死亡，游戏进程存活）。窗口外或主线程的真实内存错误仍交给
      * 原有处理流程。
      */
     if (context != nullptr
@@ -1900,8 +1903,8 @@ static void limbus_sigsegv_guard(int sig, siginfo_t *info, void *context) {
             && pc == address
             && !limbus_signal_is_mapped(pc)
             && g_limbus_appsealing_base != 0
-            && lr >= g_limbus_appsealing_base + 0xd18dc
-            && lr <= g_limbus_appsealing_base + 0xd1913
+            && lr >= g_limbus_appsealing_base + 0xd1100
+            && lr <= g_limbus_appsealing_base + 0xd394f
             && limbus_signal_raw_syscall4(__NR_gettid, 0, 0, 0, 0)
                     != limbus_signal_raw_syscall4(__NR_getpid, 0, 0, 0, 0)) {
         static volatile int kill_jump_neuters = 0;
