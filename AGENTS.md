@@ -67,6 +67,11 @@
   `libcovault-appsec.so+0x248e0`）、非主线程。已在 `limbus_sigsegv_guard` 中按
   "确认现场才接管"纪律加恢复分支: 五要素全匹配时把 pc 恢复为 lr（自杀调用等价于普通返回）,
   并打印 `neutered AppSealing 30010 kill jump` 供核验; 其余真实内存错误不受影响。
+- guard 构建（v1.4-test-30010-guard）真机验证: 第一跳被正确 neuter（lr-4 指令确认为
+  `BLR X2`），但看门狗继续执行到**同一函数的第二跳** `lr=base+0xd18f4`
+  （`pc=addr=0x80001204`、`x1=0x80001204`）后仍死亡。已把接管规则扩为确认窗口:
+  `pc==addr` 且未映射、`lr ∈ [base+0xd18dc, base+0xd18ff]`、非主线程时恢复 pc=lr,
+  同一进程累计超过 8 次则按 v1.2 Thread-5 先例原始 exit 结束看门狗线程防死循环。
 
 ## 当前调试状态
 

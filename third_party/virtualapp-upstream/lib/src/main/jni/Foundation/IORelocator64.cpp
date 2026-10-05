@@ -1884,25 +1884,41 @@ static void limbus_sigsegv_guard(int sig, siginfo_t *info, void *context) {
     /*
      * 2026-10-05 vivo V2453A / Android 16 (API 36)、游戏 v478（covault C220605-002）
      * 的 30010 自杀路径：AppSealing 看门狗线程（Thread-4）不经过 tkill/tgkill/
-     * pthread_kill（libc 信号 hook 因此抓不到），而是执行一条跳向无效地址的
-     * 间接分支自毁。运行期诊断现场固定为：
-     *   pc = address = 0x4000（取指缺页，si_code=1）
-     *   x2 = 0x4000（被间接调用的无效函数指针）
-     *   lr = libcovault-appsec.so + 0xd18e0（自杀调用点的返回地址）
-     * 只在基址、偏移、故障地址、寄存器全部吻合且位于非主线程时，把 pc 恢复
-     * 为 lr，使这次“自杀调用”等价于一次普通返回；其余真实内存错误仍交给
+     * pthread_kill（libc 信号 hook 因此抓不到），而是在 base+0xd18dc 起的同一
+     * 段确认代码里连续执行多条跳向无效地址的间接分支自毁。运行期已确认两跳：
+     *   第一跳 pc=address=0x4000、x2=0x4000、lr=base+0xd18e0（lr-4=BLR X2）
+     *   第二跳 pc=address=0x80001204、x1=0x80001204、lr=base+0xd18f4
+     * 只在故障地址即 PC、PC 未映射、lr 落在确认窗口 [base+0xd18dc, base+0xd18ff]
+     * 且为非主线程时接管：恢复 pc=lr 让这条自杀调用等价于普通返回；同一进程
+     * 累计超过 8 次则按 v1.2 Thread-5 先例以原始 exit 结束该看门狗线程，
+     * 防止修复被反复触发形成死循环。窗口外或主线程的真实内存错误仍交给
      * 原有处理流程。
      */
     if (context != nullptr
             && info != nullptr
             && info->si_code > 0
             && pc == address
-            && address == 0x4000
-            && registers[2] == 0x4000
+            && !limbus_signal_is_mapped(pc)
             && g_limbus_appsealing_base != 0
-            && lr == g_limbus_appsealing_base + 0xd18e0
+            && lr >= g_limbus_appsealing_base + 0xd18dc
+            && lr <= g_limbus_appsealing_base + 0xd18ff
             && limbus_signal_raw_syscall4(__NR_gettid, 0, 0, 0, 0)
                     != limbus_signal_raw_syscall4(__NR_getpid, 0, 0, 0, 0)) {
+        static volatile int kill_jump_neuters = 0;
+        int neuters = __sync_add_and_fetch(&kill_jump_neuters, 1);
+        if (neuters > 8) {
+            static const char isolated_message[] =
+                    "Limbus SIGSEGV guard: isolated AppSealing 30010 kill loop, exiting watchdog thread\n";
+            limbus_signal_raw_syscall4(
+                    __NR_write,
+                    STDERR_FILENO,
+                    reinterpret_cast<long>(isolated_message),
+                    sizeof(isolated_message) - 1,
+                    0);
+            for (;;) {
+                limbus_signal_raw_syscall4(__NR_exit, 0, 0, 0, 0);
+            }
+        }
         auto *ucontext = reinterpret_cast<ucontext_t *>(context);
         ucontext->uc_mcontext.pc = lr;
         char message[192];
@@ -1910,7 +1926,12 @@ static void limbus_sigsegv_guard(int sig, siginfo_t *info, void *context) {
         char *msg_end = message + sizeof(message) - 2;
         msg = limbus_signal_append_text(
                 msg, msg_end,
-                "Limbus SIGSEGV guard: neutered AppSealing 30010 kill jump, resumed at lr insn=");
+                "Limbus SIGSEGV guard: neutered AppSealing 30010 kill jump #");
+        msg = limbus_signal_append_signed(msg, msg_end, neuters);
+        msg = limbus_signal_append_text(msg, msg_end, " lr_off=");
+        msg = limbus_signal_append_hex(msg, msg_end,
+                lr - g_limbus_appsealing_base);
+        msg = limbus_signal_append_text(msg, msg_end, " insn=");
         if (limbus_signal_is_mapped(lr - 4)) {
             msg = limbus_signal_append_hex(
                     msg, msg_end,
