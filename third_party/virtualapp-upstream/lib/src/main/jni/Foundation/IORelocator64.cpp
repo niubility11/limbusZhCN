@@ -4661,6 +4661,47 @@ static bool patch_limbus_nop(uintptr_t base,
     return true;
 }
 
+/*
+ * 30010 自杀函数处置（covault C220605-002，vivo V2453A / Android 16 / 游戏 v478）：
+ * 看门狗线程在 base+0xd18dc / base+0xd18f0 连续执行跳向运行期垃圾地址的
+ * BLR 间接调用自毁。2026-10-05 两份真机日志确认：一次跳向 0x4000/0x80001204
+ * 两个未映射地址，一次跳进 libart 合法地址后以垃圾参数空指针崩溃——目标值
+ * 每次不同，在崩溃点兜底无法覆盖“目标恰好合法”的情况。因此直接把该确认
+ * 窗口内的 BLR/BR 间接分支 NOP 掉：neuter 恢复点之后的代码已被真机验证可
+ * 正常执行，fallen-through 路径安全。窗口内非 BLR/BR 指令一律不动，并做
+ * 一次性 dump 留档供后续核对。
+ */
+static void patch_limbus_30010_kill(uintptr_t base) {
+    static pthread_mutex_t kill_patch_lock = PTHREAD_MUTEX_INITIALIZER;
+    static bool dumped = false;
+    pthread_mutex_lock(&kill_patch_lock);
+    if (!dumped) {
+        dumped = true;
+        for (uintptr_t row = 0xd18c0; row < 0xd1950; row += 0x18) {
+            ALOGE("Limbus 30010 dump >>> base+0x%lx : %08x %08x %08x %08x %08x %08x",
+                  static_cast<unsigned long>(row),
+                  *reinterpret_cast<volatile uint32_t *>(base + row),
+                  *reinterpret_cast<volatile uint32_t *>(base + row + 0x4),
+                  *reinterpret_cast<volatile uint32_t *>(base + row + 0x8),
+                  *reinterpret_cast<volatile uint32_t *>(base + row + 0xc),
+                  *reinterpret_cast<volatile uint32_t *>(base + row + 0x10),
+                  *reinterpret_cast<volatile uint32_t *>(base + row + 0x14));
+        }
+    }
+    for (uintptr_t offset = 0xd18dc; offset <= 0xd18f8; offset += 0x4) {
+        uint32_t insn = *reinterpret_cast<volatile uint32_t *>(base + offset);
+        if (((insn & 0xfffffc1fU) != 0xd63f0000U)       // BLR Xn
+                && ((insn & 0xfffffc1fU) != 0xd61f0000U)) { // BR Xn
+            continue;
+        }
+        ALOGE("Limbus 30010 patch >>> blr found offset=0x%lx insn=0x%08x",
+              static_cast<unsigned long>(offset),
+              insn);
+        patch_limbus_nop(base, offset, "30010-kill-jump", insn);
+    }
+    pthread_mutex_unlock(&kill_patch_lock);
+}
+
 static void patch_limbus_appsealing_70034(uintptr_t base) {
     static pthread_mutex_t patch_lock = PTHREAD_MUTEX_INITIALIZER;
     static uintptr_t expected_base = 0;
@@ -4696,6 +4737,9 @@ static void patch_limbus_appsealing_70034(uintptr_t base) {
     // verified cleanup target for this function instead of continuing with stale state.
     bool fifth = patch_limbus_relative_branch(base, 0x4e564, 0x4e998,
                                               "50048-report-cleanup", expected_original[4]);
+    // Neutralize the confirmed 30010 watchdog kill jumps (indirect BLR/BR to
+    // garbage targets) inside their verified window; see the function comment.
+    patch_limbus_30010_kill(base);
     if (!first || !second || !third || !fourth || !fifth) {
         ALOGE("Limbus AppSealing patch >>> incomplete base=%p results=%d/%d/%d/%d/%d",
               reinterpret_cast<void *>(base),

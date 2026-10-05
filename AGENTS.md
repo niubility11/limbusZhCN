@@ -69,9 +69,16 @@
   并打印 `neutered AppSealing 30010 kill jump` 供核验; 其余真实内存错误不受影响。
 - guard 构建（v1.4-test-30010-guard）真机验证: 第一跳被正确 neuter（lr-4 指令确认为
   `BLR X2`），但看门狗继续执行到**同一函数的第二跳** `lr=base+0xd18f4`
-  （`pc=addr=0x80001204`、`x1=0x80001204`）后仍死亡。已把接管规则扩为确认窗口:
+  （  `pc=addr=0x80001204`、`x1=0x80001204`）后仍死亡。已把接管规则扩为确认窗口:
   `pc==addr` 且未映射、`lr ∈ [base+0xd18dc, base+0xd18ff]`、非主线程时恢复 pc=lr,
   同一进程累计超过 8 次则按 v1.2 Thread-5 先例原始 exit 结束看门狗线程防死循环。
+- guard2 真机验证: 游戏首次走完载入界面, 但提示界面阶段看门狗的自杀 BLR 这次
+  跳进了 libart 合法地址并以垃圾参数空指针崩溃（`lr` 在 libart 内, 崩溃点兜底
+  无法覆盖）。结论: 自杀 BLR 的目标是运行期垃圾值, 必须拔根。已在
+  `patch_limbus_appsealing_70034` 中挂入 `patch_limbus_30010_kill`: 一次性 dump
+  `base+0xd18c0~0xd1950` 指令留档, 并把窗口 `[0xd18dc, 0xd18f8]` 内所有
+  BLR/BR 编码（`0xd63f0000`/`0xd61f0000` 掩码匹配）NOP 掉, 每个点位记录原始指令;
+  guard 窗口 neuter 规则保留作为兜底。
 
 ## 当前调试状态
 
