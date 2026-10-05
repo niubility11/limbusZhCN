@@ -1920,6 +1920,34 @@ static void limbus_sigsegv_guard(int sig, siginfo_t *info, void *context) {
             limbus_signal_raw_syscall4(__NR_exit, 0, 0, 0, 0);
         }
     }
+    /*
+     * 2026-10-05 真机日志（205935/213318）确认处决变体的共同特征：看门狗线程
+     * 带着被改写的返回地址（lr 未映射，如 0x0020a675ea62dec4、
+     * 0x00420075ea311f1c）执行到合法代码段后崩溃（pc 落在 libart 等已映射
+     * 段，addr 为小偏移）。正常同步故障（ART 隐式空指针检查、covault 探针、
+     * GC、Binder 回调）的 LR 必然落在已映射代码段。因此对"同步 SIGSEGV +
+     * 非主线程 + LR 未映射"的现场按同一策略隔离线程，不再逐个偏移打地鼠；
+     * 主线程或 LR 正常的真实内存错误仍交给原有处理流程。
+     */
+    if (info != nullptr
+            && info->si_code > 0
+            && lr != 0
+            && !limbus_signal_is_mapped(lr)
+            && limbus_signal_raw_syscall4(__NR_gettid, 0, 0, 0, 0)
+                    != limbus_signal_raw_syscall4(__NR_getpid, 0, 0, 0, 0)) {
+        static const char corrupted_lr_message[] =
+                "Limbus SIGSEGV guard: corrupted-LR background fault, isolating thread\n";
+        limbus_signal_raw_syscall4(
+                __NR_write,
+                STDERR_FILENO,
+                reinterpret_cast<long>(corrupted_lr_message),
+                sizeof(corrupted_lr_message) - 1,
+                0);
+        __android_log_write(ANDROID_LOG_WARN, "LimbusSIG", corrupted_lr_message);
+        for (;;) {
+            limbus_signal_raw_syscall4(__NR_exit, 0, 0, 0, 0);
+        }
+    }
 #endif
     cursor = limbus_signal_append_text(cursor, end, "Limbus SIGSEGV guard: si_code=");
     cursor = limbus_signal_append_signed(cursor, end, info != nullptr ? info->si_code : 0);
