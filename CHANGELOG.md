@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- (vivo V2453A / Android 16 / Limbus v478 / covault C220605-002) Suppress the AppSealing kill chain that terminated the containerized game with disguised SIGSEGV crashes before login: resolve the XOR-obfuscated kill dispatcher at runtime and neutralize its entry, and guard-isolate the watchdog thread on garbage indirect-call faults (`SEGV_MAPERR`/`SEGV_ACCERR`), null-object reads inside the kill routine, and corrupted-LR background faults.
+- Use the host physical UID/PID/package for ContentProvider calls on Android 12+ in `VAContentProviderProxy` (cherry-picked from upstream issue4), fixing the `GoogleApiHandler` `SecurityException: Calling uid doesn't match source uid` crash at Google login.
+- Capture AppSealing kill-caller `libcovault-appsec.so` offsets in `tkill`/`tgkill`/`pthread_kill` diagnostics for future covault versions.
+
+### Changed
+
+- Bump `versionCode` to 6 and `versionName` to 1.4.1 for the vivo/Android 16 compatibility release.
+
+## [1.4]
+
 ### Added
 
 - Add exact Firebase Auth `genericidp`/`recaptcha` browser redirect routing back into the containerized Limbus activities for Apple ID and reCAPTCHA completion.
