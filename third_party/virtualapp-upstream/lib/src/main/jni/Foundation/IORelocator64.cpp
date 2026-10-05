@@ -4654,6 +4654,83 @@ static bool patch_limbus_nop(uintptr_t base,
  */
 static void patch_limbus_30010_kill(uintptr_t base) {
     patch_limbus_nop(base, 0x70128, "30010-kill-dispatch", 0xd63f00a0);
+
+    /*
+     * 运行期解析击杀分发器：所有已确认的击杀上报点（30001/30007/30009/30010）
+     * 共用同一对 XOR 混淆全局（GOT 链 0x193c78 与密钥 0x1936f8，仅运行期有效，
+     * 静态文件读不出）。解密出目标函数入口后，将其前两条指令替换为
+     * `mov x0, #0; ret`，使任何码、任何路径的击杀调度直接空返回。
+     * 处决链（含 205935 运行观察到的“先 pause 再杀”变体）都汇经该分发器。
+     * 解析失败或目标不在 covault 内时仅记录，不做任何改写。
+     */
+    const uintptr_t enc_ptr_slot = base + 0x193c78;
+    const uintptr_t key_ptr_slot = base + 0x1936f8;
+    if (!limbus_signal_is_mapped(enc_ptr_slot) || !limbus_signal_is_mapped(key_ptr_slot)) {
+        ALOGE("Limbus 30010 resolve >>> dispatcher slots unmapped");
+        return;
+    }
+    uintptr_t p1 = *reinterpret_cast<volatile uintptr_t *>(enc_ptr_slot);
+    uintptr_t p3 = *reinterpret_cast<volatile uintptr_t *>(key_ptr_slot);
+    if (p1 == 0 || p3 == 0
+            || !limbus_signal_is_mapped(p1) || !limbus_signal_is_mapped(p3)) {
+        ALOGE("Limbus 30010 resolve >>> first-level pointers invalid p1=%p p3=%p",
+              reinterpret_cast<void *>(p1), reinterpret_cast<void *>(p3));
+        return;
+    }
+    uintptr_t p2 = *reinterpret_cast<volatile uintptr_t *>(p1);
+    if (p2 == 0 || !limbus_signal_is_mapped(p2)) {
+        ALOGE("Limbus 30010 resolve >>> second-level pointer invalid p2=%p",
+              reinterpret_cast<void *>(p2));
+        return;
+    }
+    uintptr_t v3 = *reinterpret_cast<volatile uintptr_t *>(p2);
+    if (v3 == 0 || !limbus_signal_is_mapped(v3)) {
+        ALOGE("Limbus 30010 resolve >>> third-level pointer invalid v3=%p",
+              reinterpret_cast<void *>(v3));
+        return;
+    }
+    uintptr_t enc = *reinterpret_cast<volatile uintptr_t *>(v3);
+    uintptr_t key = *reinterpret_cast<volatile uintptr_t *>(p3);
+    uintptr_t target = enc ^ key;
+    ALOGE("Limbus 30010 resolve >>> p1=%p p2=%p v3=%p enc=%p key=%p target=%p (off=0x%lx)",
+          reinterpret_cast<void *>(p1), reinterpret_cast<void *>(p2),
+          reinterpret_cast<void *>(v3),
+          reinterpret_cast<void *>(enc), reinterpret_cast<void *>(key),
+          reinterpret_cast<void *>(target),
+          target > base ? static_cast<unsigned long>(target - base) : 0UL);
+    if (target <= base || target >= base + 0x18bda8
+            || !limbus_signal_is_mapped(target)) {
+        ALOGE("Limbus 30010 resolve >>> target outside covault, skip");
+        return;
+    }
+    uintptr_t entry_offset = target - base;
+    auto *entry = reinterpret_cast<volatile uint32_t *>(target);
+    uint32_t original0 = entry[0];
+    uint32_t original1 = entry[1];
+    ALOGE("Limbus 30010 dispatch patch >>> entry=base+0x%lx original=%08x %08x",
+          static_cast<unsigned long>(entry_offset),
+          original0,
+          original1);
+    long page_size = sysconf(_SC_PAGESIZE);
+    if (page_size <= 0) {
+        page_size = 4096;
+    }
+    uintptr_t page_start = target & ~static_cast<uintptr_t>(page_size - 1);
+    if (mprotect(reinterpret_cast<void *>(page_start),
+                 static_cast<size_t>(page_size) * 2,
+                 PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
+        ALOGE("Limbus 30010 dispatch patch >>> mprotect failed errno=%d", errno);
+        return;
+    }
+    entry[0] = 0xd2800000U; // mov x0, #0
+    entry[1] = 0xd65f03c0U; // ret
+    __builtin___clear_cache(reinterpret_cast<char *>(const_cast<uint32_t *>(entry)),
+                            reinterpret_cast<char *>(const_cast<uint32_t *>(entry)) + 8);
+    mprotect(reinterpret_cast<void *>(page_start),
+             static_cast<size_t>(page_size) * 2,
+             PROT_READ | PROT_EXEC);
+    ALOGE("Limbus 30010 dispatch patch >>> neutralized entry=base+0x%lx",
+          static_cast<unsigned long>(entry_offset));
 }
 
 static void patch_limbus_appsealing_70034(uintptr_t base) {
